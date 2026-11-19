@@ -1,0 +1,182 @@
+Benchmark viewer patch for HP2-SLAM (upstream 5f33946), applied after
+hp2slam_no_debug_leftovers.patch to the installed hp2_slam package. It
+changes only the Open3D live view; the estimate is unchanged:
+  - the camera is free by default, like RViz (mouse: left-drag rotates,
+    Ctrl+left-drag or middle-drag pans, the wheel zooms); F cycles
+    free -> follow -> topdown (the author's modes, which re-centre on the
+    current pose every scan);
+  - the finished local maps are drawn in grey at their current key poses,
+    so the whole map is visible and moves with loop closures;
+  - the view's bounds grow with the map (Open3D limits zooming out to them)
+    while the camera stays where it is;
+  - loop closures are drawn in red (the author's list was never filled);
+  - ESC/Q or closing the window closes the viewer only; the author's
+    os._exit(0) ended HP2-SLAM without writing any result.
+
+--- a/hp2_slam/tools/visualizer.py	2026-11-19 12:43:44.022728769 +0100
++++ b/hp2_slam/tools/visualizer.py	2026-11-19 12:42:37.785112016 +0100
+@@ -52,9 +52,16 @@
+         self.block_vis = True
+         self.play_crun = False
+         self.reset_bounding_box = True
+-        self.view_mode = "topdown"
++        # Benchmark: "free" (default) leaves the camera to the mouse, like RViz;
++        # F cycles free -> follow -> topdown.
++        self.view_mode = "free"
++        self.closed = False
++        self.frame_count = 0
+ 
+         self.local_map = self.o3d.geometry.PointCloud()
++        # Benchmark: the finished local maps, in grey, at their current key poses.
++        self.global_map = self.o3d.geometry.PointCloud()
++        self.global_map_shown = False
+         self.closures = []
+         self.key_poses = []
+         self.key_frames = []
+@@ -69,14 +76,25 @@
+         self._initialize_visualizer()
+ 
+     def update(self, slam):
++        # Benchmark: once the viewer is closed, SLAM goes on without it.
++        if self.closed:
++            return
+         self._update_geometries(slam)
+-        while self.block_vis:
+-            self.vis.poll_events()
++        while self.block_vis and not self.closed:
++            if not self.vis.poll_events():
++                self._close_viewer()
++                break
+             self.vis.update_renderer()
+             if self.play_crun:
+                 break
+         self.block_vis = not self.block_vis
+ 
++    def _close_viewer(self):
++        if not self.closed:
++            self.closed = True
++            self.vis.destroy_window()
++            print("[Viewer] closed; HP2-SLAM continues without it")
++
+     def _initialize_visualizer(self):
+         w_name = self.__class__.__name__
+         self.vis.create_window(window_name=w_name, width=1920, height=1080)
+@@ -86,14 +104,16 @@
+         ro.point_size = 1
+         ro.line_width = 10
+         print(
+-            f"{w_name} initialized. Press:\n"
++            f"{w_name} initialized. Mouse: left-drag rotates, Ctrl+left-drag or\n"
++            "middle-drag pans, the wheel zooms. Yellow: current local map; grey:\n"
++            "finished local maps; red lines: loop closures. Press:\n"
+             "\t[SPACE] to pause/start\n"
+-            "\t  [ESC] to exit\n"
++            "\t  [ESC] to close the viewer (HP2-SLAM continues)\n"
+             "\t    [N] to step\n"
+-            "\t    [C] to center the viewpoint\n"
++            "\t    [C] to fit the whole map in view\n"
+             "\t    [W] to toggle a white background\n"
+             "\t    [B] to toggle a black background\n"
+-            "\t    [F] to toggle camera mode (follow <-> topdown)\n"
++            "\t    [F] to cycle the camera mode (free -> follow -> topdown)\n"
+         )
+ 
+     def _register_key_callback(self, keys: List, callback: Callable):
+@@ -116,9 +136,9 @@
+         vis.get_render_option().background_color = [1.0, 1.0, 1.0]
+ 
+     def _quit(self, vis):
+-        print("Destroying Visualizer")
+-        vis.destroy_window()
+-        os._exit(0)
++        # Benchmark: closes the viewer only; the author's os._exit(0) ended
++        # HP2-SLAM without writing any result.
++        self._close_viewer()
+ 
+     def _next_frame(self, vis):
+         self.block_vis = not self.block_vis
+@@ -130,9 +150,35 @@
+         vis.reset_view_point(True)
+ 
+     def _toggle_view_mode(self, vis):
+-        self.view_mode = "follow" if self.view_mode == "topdown" else "topdown"
++        modes = ["free", "follow", "topdown"]
++        self.view_mode = modes[(modes.index(self.view_mode) + 1) % len(modes)]
+         print(f"[View] mode -> {self.view_mode.upper()}")
+ 
++    def _grow_view_bounds(self, geometry, shown=True):
++        """(Re)adds geometry with reset_bounding_box=True so the view's bounds
++        (zoom range, clipping) include it, then puts the camera back where it was."""
++        ctr = self.vis.get_view_control()
++        params = ctr.convert_to_pinhole_camera_parameters()
++        if shown:
++            self.vis.remove_geometry(geometry, reset_bounding_box=False)
++        self.vis.add_geometry(geometry, reset_bounding_box=True)
++        ctr.convert_from_pinhole_camera_parameters(params, allow_arbitrary=True)
++
++    def _update_global_map(self, slam):
++        chunks = [
++            transform_points(
++                local_map.pcd.point.positions.cpu().numpy().astype(np.float64), local_map.keypose
++            )
++            for local_map in slam.local_map_graph.local_maps()
++            if local_map.pcd is not None
++        ]
++        if not chunks:
++            return
++        self.global_map.points = self.o3d.utility.Vector3dVector(np.vstack(chunks))
++        self.global_map.paint_uniform_color(GREY)
++        self._grow_view_bounds(self.global_map, shown=self.global_map_shown)
++        self.global_map_shown = True
++
+     def _add_line(self, pose0, pose1, color):
+         lines = [[0, 1]]
+         colors = [color]
+@@ -200,14 +246,30 @@
+         self.odom_frames = [self._add_frame(current_pose, SPHERE_SIZE_ODOMETRY, BLUE)]
+         self.vis.add_geometry(self.odom_frames[0], reset_bounding_box=False)
+ 
++        # Benchmark: the camera moves only in follow/topdown mode; in free mode
++        # it stays where the mouse put it (first frame: the author's top-down view).
+         if self.view_mode == "follow":
+             self._follow_pose(current_pose)
+-        else:
++        elif self.view_mode == "topdown" or self.reset_bounding_box:
++            if self.reset_bounding_box:
++                self.vis.reset_view_point(True)
++                self.reset_bounding_box = False
+             self._topdown_view(current_pose[:3, 3])
+ 
++        # Benchmark: every 50 scans the view's bounds grow to the current local
++        # map, so zooming out reaches it (Open3D limits zoom to those bounds).
++        self.frame_count += 1
++        if self.frame_count % 50 == 0:
++            self._grow_view_bounds(self.local_map)
++
+         key_poses = slam.get_keyposes()
+-        if key_poses != self.key_poses:
++        if len(key_poses) != len(self.key_poses) or any(
++            not np.array_equal(a, b) for a, b in zip(key_poses, self.key_poses)
++        ):
+             self.key_poses = key_poses
++            # Benchmark: the closures come from the SLAM (the author's list stayed empty).
++            self.closures = list(slam.get_closures())
++            self._update_global_map(slam)
+ 
+             for frame in self.key_frames:
+                 self.vis.remove_geometry(frame, reset_bounding_box=False)
+@@ -233,11 +295,9 @@
+             for e in self.edges:
+                 self.vis.add_geometry(e, reset_bounding_box=False)
+ 
+-        if self.reset_bounding_box:
+-            self.vis.reset_view_point(True)
+-            self.reset_bounding_box = False
+-
+-        self.vis.poll_events()
++        if not self.vis.poll_events():
++            self._close_viewer()
++            return
+         self.vis.update_renderer()
+ 
+         # Free up memory

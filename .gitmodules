@@ -1,0 +1,3 @@
+[submodule "src/hp2slam"]
+	path = src/hp2slam
+	url = https://github.com/cogniboticslab/hp2slam.git

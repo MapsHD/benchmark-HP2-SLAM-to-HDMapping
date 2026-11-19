@@ -34,14 +34,20 @@ def preflight(bag, topic):
     try:
         with AnyReader([Path(bag)]) as reader:
             connections = [c for c in reader.connections if c.topic == topic]
+            livox = sorted({c.topic for c in reader.connections if c.msgtype.endswith("/CustomMsg")})
+            livox_hint = (f" The bag has the Livox CustomMsg topic(s) {', '.join(livox)}, which HP2-SLAM "
+                          "cannot read: convert the bag to PointCloud2 with livox_bag_aggregate "
+                          "(https://github.com/MapsHD/livox_bag_aggregate) and pass the resulting "
+                          "<bag>-pc.bag, e.g. reg-1.bag-pc.bag." if livox else "")
             if not connections:
                 clouds = [c.topic for c in reader.connections if c.msgtype == "sensor_msgs/msg/PointCloud2"]
                 raise PreflightError(f"topic {topic} is not in {bag}; "
-                                     f"PointCloud2 topics: {', '.join(clouds) or '(none)'}. "
-                                     "Set TOPIC to one of them.")
+                                     f"its PointCloud2 topics: {', '.join(clouds) or '(none)'}. "
+                                     "Set TOPIC to the LiDAR one." + livox_hint)
             msgtype = connections[0].msgtype
             if msgtype != "sensor_msgs/msg/PointCloud2":
-                raise PreflightError(f"{topic} is {msgtype}; HP2-SLAM reads sensor_msgs/msg/PointCloud2")
+                raise PreflightError(f"{topic} is {msgtype}; HP2-SLAM reads sensor_msgs/msg/PointCloud2."
+                                     + livox_hint)
             count = sum(c.msgcount for c in connections)
             if count == 0:
                 raise PreflightError(f"{topic} has no messages in {bag}")
@@ -58,10 +64,12 @@ def preflight(bag, topic):
         raise PreflightError(f"{topic} lacks the point fields {missing} (fields: {names})")
     time_field = next((n for n in names if n in TIME_FIELDS), None)
     print(f"[preflight] {topic}: {count} PointCloud2 messages, fields {names}")
+    # HP2-SLAM's front end is KISS-ICP's (vendored as hybrid-icp), so the
+    # deskewing and the accepted time field names are KISS-ICP's.
     if time_field:
-        print(f"[preflight] per-point time field '{time_field}': KISS-ICP deskews the scans")
+        print(f"[preflight] per-point time field '{time_field}': HP2-SLAM deskews each scan with it")
     else:
-        print("[preflight] WARNING: no per-point time field (t/timestamp/time): scans are not deskewed")
+        print("[preflight] WARNING: no per-point time field (t/timestamp/time): HP2-SLAM cannot deskew the scans")
 
 
 def run_slam(bag, topic, out_root, config_file, visualize):

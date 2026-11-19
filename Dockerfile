@@ -96,6 +96,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libusb-1.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
+# ── Benchmark viewer: free camera and the whole map, like RViz ───────────────
+# See overlay/viewer/hp2slam_viewer_like_rviz.patch (visualisation only; the
+# estimate is unchanged). Applied to the installed hp2_slam package in this
+# late layer, so a viewer change does not rebuild g2o and SuiteSparse.
+COPY ./overlay/viewer/ ./viewer/
+RUN SITE=$(python3 -c "import hp2_slam, os; print(os.path.dirname(os.path.dirname(hp2_slam.__file__)))") && \
+    patch -p1 --batch -d "$SITE" < viewer/hp2slam_viewer_like_rviz.patch && \
+    grep -q 'self.view_mode = "free"' "$SITE/hp2_slam/tools/visualizer.py" && \
+    ! grep -qE "^\s*os\._exit\(" "$SITE/hp2_slam/tools/visualizer.py" && \
+    python3 -m py_compile "$SITE/hp2_slam/tools/visualizer.py"
+
 COPY ./overlay/scripts/ ./scripts/
 
 # The final guards fail the image build loudly: first every shared library the

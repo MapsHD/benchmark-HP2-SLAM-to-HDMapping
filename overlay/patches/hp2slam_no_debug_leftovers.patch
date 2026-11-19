@@ -1,0 +1,57 @@
+Benchmark patch for HP2-SLAM (upstream 5f33946). Switches off debugging
+output that stalls or floods an unattended run; the estimate is unchanged:
+  - hybrid-icp Registration.cpp: VisualizeStatus() clears the terminal and
+    prints a status bar on every ICP iteration, and after convergence, when
+    alpha > 0.95, a block writes an ASCII PLY of the correspondences into
+    ./alpha_dumps and waits on std::cin for ENTER. Both are put behind
+    kDebugOutput = false (deleting them would leave the helpers unused, an
+    error under the vendored -Werror);
+  - hp2_slam/tools/visualizer.py: the Open3D viewer saves a 1920x1080
+    screenshot of every frame into ./renders (thousands of PNGs per run).
+
+--- a/hybrid-icp/cpp/hybrid_icp/core/Registration.cpp	2026-11-17 10:11:35.922725456 +0100
++++ b/hybrid-icp/cpp/hybrid_icp/core/Registration.cpp	2026-11-17 17:56:33.055504446 +0100
+@@ -398,6 +398,10 @@
+     std::vector<Eigen::Vector3d> source = frame;
+     TransformPoints(initial_guess, source);
+ 
++    // Benchmark: the console status bar and the "dump a PLY and wait for
++    // ENTER" block below are debugging output; switched off for unattended runs.
++    constexpr bool kDebugOutput = false;
++
+     Sophus::SE3d T_icp;
+     // Lưu corr/alpha của iteration cuối để dump "1 file / frame"
+     HybridCorrespondence last_corr;
+@@ -414,7 +418,7 @@
+             : 0.5;
+ 
+         // --- Live console status (tuỳ chọn) ---
+-        VisualizeStatus(corr.planar_count, corr.non_planar_count, alpha);
++        if (kDebugOutput) VisualizeStatus(corr.planar_count, corr.non_planar_count, alpha);
+ 
+         // Solve hybrid linear system
+         auto [JTJ, JTr] = BuildHybridLinearSystemParallel(corr, kernel, alpha);
+@@ -435,7 +439,7 @@
+ 
+     // === Dump đúng 1 lần cho mỗi frame sau khi hội tụ ===
+     // Chỉ dump khi alpha > 0.6 như yêu cầu
+-    if (last_alpha >0.95) {
++    if (kDebugOutput && last_alpha >0.95) {
+         static int s_frame_dump_id = 0;  // counter cục bộ cho file tên đẹp
+         const std::string kDumpDir = "alpha_dumps";
+         const bool dump_targets = false; // đặt true nếu muốn thêm các điểm target
+--- a/hp2_slam/tools/visualizer.py	2026-11-17 10:11:35.924725440 +0100
++++ b/hp2_slam/tools/visualizer.py	2026-11-17 10:11:39.939691551 +0100
+@@ -240,12 +240,6 @@
+         self.vis.poll_events()
+         self.vis.update_renderer()
+ 
+-        # Save PNG image for current scan
+-        os.makedirs("renders", exist_ok=True)
+-        filename = f"renders/scan_{self.frame_id:04d}.png"
+-        self.vis.capture_screen_image(filename)
+-        self.frame_id += 1
+-
+         # Free up memory
+         gc.collect()
+ 
